@@ -337,18 +337,34 @@ button:focus-visible {
   line-height: 1.55;
 }
 
+/* Altezze fisse: il pannello non cambia misura mentre
+   arrivano le letture, così la pagina non salta. */
+#signals {
+  position: relative;
+}
+
 .metric {
   padding: 14px 0 13px;
   border-bottom: 1px solid var(--linea);
 }
 
+/* Riga non usata: resta, invisibile, a tenere lo spazio */
+.metric.unused {
+  visibility: hidden;
+}
+
 .metric-name {
-  display: block;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  min-height: calc(2 * 1.35em);
   font-size: 17px;
   line-height: 1.35;
 }
 
 .reading {
+  min-height: 21px;
   display: grid;
   grid-template-columns: 1fr 96px 44px;
   align-items: center;
@@ -381,8 +397,11 @@ button:focus-visible {
 }
 
 .empty {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
   padding: 16px 0;
-  border-bottom: 1px solid var(--linea);
   font-size: 15px;
   font-style: italic;
 }
@@ -912,6 +931,34 @@ const NOTES = {
 };
 
 let falseMode = false;
+
+// ---------- Pausa del pannello ----------
+// Mentre tocchi o scorri la pagina, "Cosa misura" e
+// "Cosa deduce" restano fermi (il riquadro video no).
+// Ripartono un secondo dopo l'ultimo movimento.
+const PAUSE_AFTER = 1000;
+let touching = false;
+let pausedUntil = 0;
+
+function holdPanel() {
+  pausedUntil = performance.now() + PAUSE_AFTER;
+}
+
+function panelPaused() {
+  return touching || performance.now() < pausedUntil;
+}
+
+window.addEventListener("scroll", holdPanel, { passive: true });
+window.addEventListener("touchstart", () => {
+  touching = true;
+}, { passive: true });
+
+for (const type of ["touchend", "touchcancel"]) {
+  window.addEventListener(type, () => {
+    touching = false;
+    holdPanel();
+  }, { passive: true });
+}
 let inferredRows = [];
 let records = [];
 
@@ -923,8 +970,7 @@ signalEmpty.className = "empty";
 
 const signalRows = Array.from({ length: 3 }, () => {
   const row = document.createElement("div");
-  row.className = "metric";
-  row.hidden = true;
+  row.className = "metric unused";
 
   const name = document.createElement("span");
   name.className = "metric-name";
@@ -957,7 +1003,7 @@ function showSignalsEmpty(text) {
   signalEmpty.textContent = text;
   signalEmpty.hidden = false;
   signalRows.forEach(r => {
-    r.row.hidden = true;
+    r.row.classList.add("unused");
     r.fill.style.width = "0%";
   });
   signalCount.textContent = "0/3";
@@ -1181,6 +1227,8 @@ function renderRecords(labels) {
 }
 
 falseToggle.addEventListener("click", () => {
+  touching = false;
+  pausedUntil = 0;
   falseMode = !falseMode;
   falseToggle.setAttribute("aria-checked", String(falseMode));
 
@@ -1441,6 +1489,11 @@ async function analyzePhoto(file) {
     if (current !== session) return;
 
     photoResult = detectInTiles(photoSource);
+
+    // La foto si disegna una volta sola: niente pausa.
+    touching = false;
+    pausedUntil = 0;
+
     const count = renderResult(photoResult);
 
     message.textContent = count
@@ -1717,12 +1770,12 @@ function updateSignals(faces) {
     const item = active[index];
 
     if (!item) {
-      r.row.hidden = true;
+      r.row.classList.add("unused");
       r.fill.style.width = "0%";
       return;
     }
 
-    r.row.hidden = false;
+    r.row.classList.remove("unused");
 
     const name = italianName(item.categoryName);
     if (r.name.textContent !== name) r.name.textContent = name;
@@ -2010,10 +2063,17 @@ function renderResult(result) {
 
   hideTags();
 
+  // Pannello in pausa: si aggiorna solo il riquadro video.
+  const paused = panelPaused();
+  if (paused) signalCount.textContent = "In pausa";
+
   if (!faces.length) {
     faceState.textContent = "Nessun volto";
-    setInferred(null);
-    showSignalsEmpty("Nessun volto nell’immagine.");
+
+    if (!paused) {
+      setInferred(null);
+      showSignalsEmpty("Nessun volto nell’immagine.");
+    }
 
     return 0;
   }
@@ -2024,7 +2084,7 @@ function renderResult(result) {
     ? faces.length + " volti rilevati"
     : "Volto rilevato";
 
-  updateSignals(faces);
+  if (!paused) updateSignals(faces);
 
   const labels = faces.map((face, index) => {
     drawFace(face.points, face.box);
@@ -2047,7 +2107,7 @@ function renderResult(result) {
     return label;
   });
 
-  setInferred(labels);
+  if (!paused) setInferred(labels);
   return faces.length;
 }
 
