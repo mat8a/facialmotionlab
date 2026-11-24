@@ -377,6 +377,7 @@ button:focus-visible {
   display: block;
   height: 100%;
   background: var(--macchina-testo);
+  transition: width .2s ease-out;
 }
 
 .empty {
@@ -442,6 +443,102 @@ button:focus-visible {
   font: 400 22px/1.2 var(--voce-penna);
   transform: rotate(-2deg);
   transform-origin: left center;
+}
+
+/* Interruttore "Conseguenze" */
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--inchiostro);
+  font: 600 12px/1 var(--editoriale-mono);
+  letter-spacing: .02em;
+  text-transform: uppercase;
+}
+
+.switch-track {
+  position: relative;
+  width: 32px;
+  height: 18px;
+  border: 2px solid var(--inchiostro);
+}
+
+.switch-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  background: var(--inchiostro);
+  transition: transform .15s ease-out;
+}
+
+.switch[aria-checked="true"] .switch-track {
+  background: var(--inchiostro);
+}
+
+.switch[aria-checked="true"] .switch-track::after {
+  background: var(--superficie);
+  transform: translateX(14px);
+}
+
+/* La pratica: quello che il sistema decide dopo l'etichetta */
+.records {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.record {
+  padding: 14px 16px 16px;
+  background: var(--notte);
+  color: var(--carta);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.record-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #ffffff2e;
+  color: var(--grigio);
+  font-size: 11px;
+}
+
+.record-fields {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 14px;
+  margin: 0;
+}
+
+.record-fields dt {
+  color: var(--grigio);
+  font-size: 11px;
+}
+
+.record-fields dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.record-fields .esito {
+  color: var(--verde-macchina);
+  font-weight: 600;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .track i,
+  .switch-track::after {
+    transition: none;
+  }
 }
 
 .legend {
@@ -526,7 +623,7 @@ button:focus-visible {
           </button>
         </div>
         <p class="start-caption">
-          Le foto restano su questo dispositivo: non vengono inviate a nessun server.
+          Le immagini restano su questo dispositivo: non vengono inviate a nessun server.
         </p>
       </div>
 
@@ -589,19 +686,29 @@ button:focus-visible {
         <div class="section-head">
           <span class="section-number">02</span>
           <h2>Cosa deduce</h2>
-          <span></span>
+          <button
+            id="falseToggle"
+            class="switch"
+            type="button"
+            role="switch"
+            aria-checked="false"
+          >
+            <span class="switch-track" aria-hidden="true"></span>
+            Conseguenze
+          </button>
         </div>
         <p class="reader machine">Regole scritte a mano su MediaPipe</p>
         <div id="inferred" class="inferred machine off" aria-live="polite">
           Nessuna lettura
         </div>
+        <div id="records" class="records" hidden></div>
         <div class="note" aria-hidden="true">
           <svg viewBox="0 0 46 40" fill="none" stroke="currentColor"
                stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <path d="M42 34 C 30 33, 16 26, 9 9"/>
             <path d="M4 15 L 9 8 L 15 13"/>
           </svg>
-          <p>un movimento, non un’emozione</p>
+          <p id="noteText">un movimento, non un’emozione</p>
         </div>
         <p class="legend">
           I nomi possibili sono gioia, tristezza, rabbia, paura, sorpresa
@@ -714,6 +821,149 @@ const message = $("#message");
 const signals = $("#signals");
 const signalCount = $("#signalCount");
 const inferred = $("#inferred");
+const recordsEl = $("#records");
+const falseToggle = $("#falseToggle");
+const noteText = $("#noteText");
+
+const reduceMotion =
+  window.matchMedia("(prefers-reduced-motion: reduce)");
+
+// La macchina scrive: il testo compare lettera per lettera.
+// Riparte solo quando il testo cambia davvero.
+function typeText(el, text, speed = 32) {
+  if (el.dataset.full === text) return;
+  el.dataset.full = text;
+  clearInterval(el._typing);
+
+  if (reduceMotion.matches) {
+    el.textContent = text;
+    return;
+  }
+
+  let shown = 0;
+  el.textContent = "";
+
+  el._typing = setInterval(() => {
+    shown++;
+    el.textContent = text.slice(0, shown);
+    if (shown >= text.length) clearInterval(el._typing);
+  }, speed);
+}
+
+// ---------- Modalità Conseguenze ----------
+// Ogni etichetta porta con sé un contesto e un provvedimento
+// ingiusto. Scritti come li scriverebbe un ufficio: è il punto.
+const CONSEQUENCES = {
+  rabbia: {
+    context: "Aeroporto · controllo di sicurezza",
+    esito: "Profilo a rischio",
+    measure: "Perquisizione personale e colloquio supplementare. Imbarco sospeso.",
+    tag: "rischio"
+  },
+  tristezza: {
+    context: "Selezione del personale · video-colloquio",
+    esito: "Motivazione insufficiente",
+    measure: "Candidatura archiviata.",
+    tag: "esclusione"
+  },
+  paura: {
+    context: "Frontiera · controllo documenti",
+    esito: "Indicatori di inganno",
+    measure: "Ingresso negato. Segnalazione inserita nel sistema.",
+    tag: "inganno"
+  },
+  disgusto: {
+    context: "Punto vendita · videosorveglianza",
+    esito: "Cliente ostile",
+    measure: "Segnalazione al personale di sicurezza. Monitoraggio attivo.",
+    tag: "ostilità"
+  },
+  sorpresa: {
+    context: "Esame online · sorveglianza automatica",
+    esito: "Comportamento anomalo",
+    measure: "Prova annullata per sospetta irregolarità.",
+    tag: "irregolarità"
+  },
+  gioia: {
+    context: "Udienza · valutazione comportamentale",
+    esito: "Assenza di rimorso",
+    measure: "Parere sfavorevole alla riduzione della pena.",
+    tag: "nessun rimorso"
+  },
+  indeterminata: {
+    context: "Scuola · aula monitorata",
+    esito: "Attenzione non rilevata",
+    measure: "Notifica automatica alla famiglia.",
+    tag: "disattenzione"
+  }
+};
+
+// La penna: quello che un essere umano avrebbe visto.
+const DEFAULT_NOTE = "un movimento, non un’emozione";
+
+const NOTES = {
+  rabbia: "stava solo pensando",
+  tristezza: "era solo stanchezza",
+  paura: "era solo agitazione",
+  disgusto: "aveva il sole negli occhi",
+  sorpresa: "aveva appena letto la domanda",
+  gioia: "si sorride anche per nervosismo",
+  indeterminata: "alcuni volti si muovono poco"
+};
+
+let falseMode = false;
+let inferredRows = [];
+let records = [];
+
+// ---------- Righe di "Cosa misura", create una volta sola ----------
+// Restano nella pagina e cambiano solo contenuto: così le barre
+// possono scorrere da un valore all'altro.
+const signalEmpty = document.createElement("div");
+signalEmpty.className = "empty";
+
+const signalRows = Array.from({ length: 3 }, () => {
+  const row = document.createElement("div");
+  row.className = "metric";
+  row.hidden = true;
+
+  const name = document.createElement("span");
+  name.className = "metric-name";
+
+  const reading = document.createElement("div");
+  reading.className = "reading machine";
+
+  const code = document.createElement("span");
+  code.className = "reading-code";
+
+  const track = document.createElement("span");
+  track.className = "track";
+
+  const fill = document.createElement("i");
+  fill.style.width = "0%";
+  track.append(fill);
+
+  const value = document.createElement("span");
+  value.className = "reading-value";
+
+  reading.append(code, track, value);
+  row.append(name, reading);
+
+  return { row, name, code, fill, value };
+});
+
+signals.replaceChildren(signalEmpty, ...signalRows.map(r => r.row));
+
+function showSignalsEmpty(text) {
+  signalEmpty.textContent = text;
+  signalEmpty.hidden = false;
+  signalRows.forEach(r => {
+    r.row.hidden = true;
+    r.fill.style.width = "0%";
+  });
+  signalCount.textContent = "0/3";
+}
+
+showSignalsEmpty("In attesa della fotocamera o di una foto.");
 
 // Un'etichetta verde per ogni volto possibile.
 const tags = Array.from({ length: MAX_FACES }, () => {
@@ -812,37 +1062,139 @@ function loadLandmarker() {
 
 // Un volto: l'emozione grande, come prima.
 // Più volti: una riga per persona, numero + emozione.
+// Le righe restano: cambia solo la parola, scritta lettera per lettera.
 function setInferred(labels) {
-  inferred.classList.remove("off", "multi");
-
   if (!labels?.length) {
+    inferredRows = [];
+    inferred.className = "inferred machine off";
     inferred.textContent = "Nessuna lettura";
-    inferred.classList.add("off");
+    renderRecords(null);
     return;
   }
 
-  if (labels.length === 1) {
-    inferred.textContent = labels[0];
+  const multiple = labels.length > 1;
+  inferred.className =
+    "inferred machine" + (multiple ? " multi" : "");
+
+  if (inferredRows.length !== labels.length) {
+    inferred.replaceChildren();
+
+    inferredRows = labels.map((_, index) => {
+      const row = document.createElement("span");
+      const word = document.createElement("span");
+
+      if (multiple) {
+        const number = document.createElement("span");
+        number.className = "inferred-number";
+        number.textContent = faceNumber(index);
+        row.append(number);
+      }
+
+      row.append(word);
+      inferred.append(row);
+      return word;
+    });
+  }
+
+  labels.forEach((label, index) =>
+    typeText(inferredRows[index], label)
+  );
+
+  renderRecords(labels);
+}
+
+function setNote(text) {
+  if (noteText.textContent !== text) noteText.textContent = text;
+}
+
+function buildRecord() {
+  const el = document.createElement("article");
+  el.className = "record machine";
+
+  const head = document.createElement("p");
+  head.className = "record-head";
+  const id = document.createElement("span");
+  const subject = document.createElement("span");
+  head.append(id, subject);
+
+  const fields = document.createElement("dl");
+  fields.className = "record-fields";
+
+  const field = (label, className) => {
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    if (className) dd.className = className;
+    fields.append(dt, dd);
+    return dd;
+  };
+
+  const context = field("Contesto");
+  const detected = field("Rilevato");
+  const esito = field("Esito", "esito");
+  const measure = field("Provvedimento");
+  const review = field("Revisione umana");
+  review.textContent = "Non prevista";
+
+  el.append(head, fields);
+  return { el, id, subject, context, detected, esito, measure, label: null };
+}
+
+// Una pratica per ogni volto. Si riscrive solo quando
+// l'etichetta di quel volto cambia.
+function renderRecords(labels) {
+  const show = falseMode && labels?.length > 0;
+
+  recordsEl.hidden = !show;
+  setNote(show ? NOTES[labels[0]] : DEFAULT_NOTE);
+
+  if (!show) {
+    if (records.length) {
+      recordsEl.replaceChildren();
+      records = [];
+    }
     return;
   }
 
-  inferred.classList.add("multi");
-
-  const fragment = document.createDocumentFragment();
+  if (records.length !== labels.length) {
+    recordsEl.replaceChildren();
+    records = labels.map(() => buildRecord());
+    records.forEach(record => recordsEl.append(record.el));
+  }
 
   labels.forEach((label, index) => {
-    const row = document.createElement("span");
+    const record = records[index];
+    if (record.label === label) return;
+    record.label = label;
 
-    const number = document.createElement("span");
-    number.className = "inferred-number";
-    number.textContent = faceNumber(index);
+    const c = CONSEQUENCES[label];
 
-    row.append(number, label);
-    fragment.append(row);
+    record.id.textContent =
+      "Pratica n. 2026/" +
+      String(Math.floor(100000 + Math.random() * 900000));
+    record.subject.textContent = "Soggetto " + faceNumber(index);
+    record.context.textContent = c.context;
+    record.detected.textContent = label;
+    typeText(record.esito, c.esito, 40);
+    typeText(record.measure, c.measure, 16);
   });
-
-  inferred.replaceChildren(fragment);
 }
+
+falseToggle.addEventListener("click", () => {
+  falseMode = !falseMode;
+  falseToggle.setAttribute("aria-checked", String(falseMode));
+
+  recordsEl.replaceChildren();
+  records = [];
+
+  // Con la foto ferma si ridisegna subito;
+  // dal vivo ci pensa il fotogramma successivo.
+  if (mode === "photo" && photoResult) {
+    renderResult(photoResult);
+  } else if (mode === "idle") {
+    renderRecords(null);
+  }
+});
 
 async function setRunningMode(next) {
   if (runningMode === next) return;
@@ -1279,9 +1631,7 @@ function resetInterface() {
   resetSlots();
   setInferred(null);
 
-  signalCount.textContent = "0/3";
-  signals.innerHTML =
-    '<div class="empty">In attesa della fotocamera o di una foto.</div>';
+  showSignalsEmpty("In attesa della fotocamera o di una foto.");
 }
 
 function resetSlots() {
@@ -1355,56 +1705,37 @@ function updateSignals(faces) {
     .sort((a, b) => b.score - a.score)
     .slice(0, 3);
 
-  signalCount.textContent = active.length + "/3";
-
   if (!active.length) {
-    signals.innerHTML =
-      '<div class="empty">Nessun movimento sopra la soglia.</div>';
+    showSignalsEmpty("Nessun movimento sopra la soglia.");
     return;
   }
 
-  const fragment =
-    document.createDocumentFragment();
+  signalCount.textContent = active.length + "/3";
+  signalEmpty.hidden = true;
 
-  for (const item of active) {
-    const row = document.createElement("div");
-    row.className = "metric";
+  signalRows.forEach((r, index) => {
+    const item = active[index];
 
-    // Voce umana: il nome in italiano.
-    const name = document.createElement("span");
-    name.className = "metric-name";
-    name.textContent = italianName(item.categoryName);
+    if (!item) {
+      r.row.hidden = true;
+      r.fill.style.width = "0%";
+      return;
+    }
 
-    // Voce della macchina: codice, barra, valore.
-    const reading = document.createElement("div");
-    reading.className = "reading machine";
+    r.row.hidden = false;
 
-    const code = document.createElement("span");
-    code.className = "reading-code";
-    code.textContent =
+    const name = italianName(item.categoryName);
+    if (r.name.textContent !== name) r.name.textContent = name;
+
+    const code =
       (multiple ? faceNumber(item.face) + " · " : "") +
       item.categoryName;
+    if (r.code.textContent !== code) r.code.textContent = code;
 
-    const track = document.createElement("span");
-    track.className = "track";
-
-    const fill = document.createElement("i");
-    fill.style.width =
-      Math.round(
-        Math.max(0, Math.min(1, item.score)) * 100
-      ) + "%";
-    track.append(fill);
-
-    const value = document.createElement("span");
-    value.className = "reading-value";
-    value.textContent = item.score.toFixed(2);
-
-    reading.append(code, track, value);
-    row.append(name, reading);
-    fragment.append(row);
-  }
-
-  signals.replaceChildren(fragment);
+    r.fill.style.width =
+      Math.round(Math.max(0, Math.min(1, item.score)) * 100) + "%";
+    r.value.textContent = item.score.toFixed(2);
+  });
 }
 
 // Regole dimostrative, non diagnosi emotive.
@@ -1682,10 +2013,7 @@ function renderResult(result) {
   if (!faces.length) {
     faceState.textContent = "Nessun volto";
     setInferred(null);
-    signalCount.textContent = "0/3";
-
-    signals.innerHTML =
-      '<div class="empty">Nessun volto nell’immagine.</div>';
+    showSignalsEmpty("Nessun volto nell’immagine.");
 
     return 0;
   }
@@ -1707,9 +2035,12 @@ function renderResult(result) {
     );
 
     const tag = tags[index];
-    tag.textContent = multiple
+    const base = multiple
       ? faceNumber(index) + " · " + label
       : "Volto_01 · " + label;
+    tag.textContent = falseMode
+      ? base + " → " + CONSEQUENCES[label].tag
+      : base;
     tag.hidden = false;
     positionTag(tag, face.box);
 
