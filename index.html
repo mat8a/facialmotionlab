@@ -141,14 +141,26 @@ body {
 }
 
 video,
-canvas {
+canvas,
+.photo {
   position: absolute;
   inset: 0;
   display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+/* Specchiato solo con la fotocamera frontale */
+.viewer.mirrored video,
+.viewer.mirrored canvas {
   transform: scaleX(-1);
+}
+
+/* La foto si vede intera, senza tagli */
+.viewer.photo-mode .photo,
+.viewer.photo-mode canvas {
+  object-fit: contain;
 }
 
 canvas { pointer-events: none; }
@@ -222,16 +234,39 @@ button:focus-visible {
 
 .start-button:hover { background: #fff; }
 
+.start-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+}
+
+.start-button.secondary {
+  padding: 12px 18px;
+  border: 2px solid var(--carta);
+  background: transparent;
+  color: var(--carta);
+}
+
+.start-button.secondary:hover {
+  background: #ffffff1a;
+}
+
 .start-button:disabled {
   opacity: .6;
   cursor: default;
 }
 
-.stop-button {
+.viewer-controls {
   position: absolute;
   z-index: 6;
   top: 12px;
   right: 12px;
+  display: flex;
+  gap: 8px;
+}
+
+.control-button {
   padding: 8px 12px;
   border: 0;
   background: var(--carta);
@@ -477,29 +512,56 @@ button:focus-visible {
       aria-label="Fotocamera e analisi del volto"
     >
       <video id="video" autoplay muted playsinline></video>
+      <img id="photo" class="photo" alt="Foto caricata" hidden>
       <canvas id="overlay"></canvas>
 
       <div id="startScreen" class="start-screen">
-        <p class="start-title">La fotocamera è spenta.</p>
-        <button id="start" class="start-button" type="button">
-          Avvia la fotocamera
-        </button>
+        <p class="start-title">Usa la fotocamera o una foto.</p>
+        <div class="start-actions">
+          <button id="start" class="start-button" type="button">
+            Avvia la fotocamera
+          </button>
+          <button id="pickPhoto" class="start-button secondary" type="button">
+            Carica una foto
+          </button>
+        </div>
         <p class="start-caption">
-          Il browser ti chiederà il permesso. Le immagini restano su questo dispositivo.
+          Foto e video restano su questo dispositivo: non vengono inviati a nessun server.
         </p>
       </div>
 
+      <input id="photoInput" type="file" accept="image/*" hidden>
+
       <div id="faceTags"></div>
 
-      <button
-        id="stop"
-        class="stop-button"
-        type="button"
-        hidden
-        aria-label="Ferma l'analisi e spegni la fotocamera"
-      >
-        Ferma
-      </button>
+      <div class="viewer-controls">
+        <button
+          id="flip"
+          class="control-button"
+          type="button"
+          hidden
+          aria-label="Passa all'altra fotocamera"
+        >
+          Gira
+        </button>
+        <button
+          id="anotherPhoto"
+          class="control-button"
+          type="button"
+          hidden
+        >
+          Altra foto
+        </button>
+        <button
+          id="stop"
+          class="control-button"
+          type="button"
+          hidden
+          aria-label="Ferma l'analisi e torna all'inizio"
+        >
+          Ferma
+        </button>
+      </div>
 
       <div class="viewer-bar machine">
         <span id="faceState">Nessun segnale</span>
@@ -519,7 +581,7 @@ button:focus-visible {
           Compaiono solo sopra 0,30.
         </p>
         <div id="signals">
-          <div class="empty">In attesa della fotocamera.</div>
+          <div class="empty">In attesa della fotocamera o di una foto.</div>
         </div>
       </section>
 
@@ -550,7 +612,7 @@ button:focus-visible {
       </section>
 
       <p id="message" class="message" role="status">
-        Avvia la fotocamera nel riquadro.
+        Avvia la fotocamera o carica una foto nel riquadro.
       </p>
     </aside>
   </main>
@@ -640,6 +702,11 @@ const ctx = canvas.getContext("2d");
 const startScreen = $("#startScreen");
 const startButton = $("#start");
 const stopButton = $("#stop");
+const flipButton = $("#flip");
+const anotherPhotoButton = $("#anotherPhoto");
+const pickPhotoButton = $("#pickPhoto");
+const photoInput = $("#photoInput");
+const photo = $("#photo");
 const faceTags = $("#faceTags");
 const faceState = $("#faceState");
 const topStatus = $("#topStatus");
@@ -670,8 +737,33 @@ let lastFaceCount = 0;
 // Stabilità dell'etichetta, separata per ogni posizione (01, 02, 03).
 let slots = [];
 
+// "idle" = fermo, "live" = fotocamera, "photo" = foto dalla galleria.
+let mode = "idle";
+let runningMode = "VIDEO";
+let facing = "user";
+let mirrored = true;
+let photoResult = null;
+
+// Le foto grandi vengono ridotte: più veloci, stesso risultato.
+const PHOTO_MAX = 1280;
+const photoSource = document.createElement("canvas");
+
 startButton.addEventListener("click", startAnalysis);
 stopButton.addEventListener("click", stopAnalysis);
+flipButton.addEventListener("click", flipCamera);
+pickPhotoButton.addEventListener("click", pickPhoto);
+anotherPhotoButton.addEventListener("click", pickPhoto);
+
+photoInput.addEventListener("change", () => {
+  const file = photoInput.files?.[0];
+  if (file) analyzePhoto(file);
+});
+
+// Con la foto ferma, le etichette vanno riallineate
+// quando cambia la dimensione della finestra.
+window.addEventListener("resize", () => {
+  if (mode === "photo" && photoResult) renderResult(photoResult);
+});
 
 // Carica il modello una sola volta, anche se si preme
 // Avvia più volte mentre il download è in corso.
@@ -736,59 +828,111 @@ function setInferred(labels) {
   inferred.replaceChildren(fragment);
 }
 
+async function setRunningMode(next) {
+  if (runningMode === next) return;
+  await landmarker.setOptions({ runningMode: next });
+  runningMode = next;
+}
+
+function setMirrored(value) {
+  mirrored = value;
+  viewer.classList.toggle("mirrored", value);
+}
+
+function sourceSize() {
+  return mode === "photo"
+    ? { width: photoSource.width, height: photoSource.height }
+    : { width: video.videoWidth, height: video.videoHeight };
+}
+
+function openCamera() {
+  if (
+    !window.isSecureContext ||
+    !navigator.mediaDevices?.getUserMedia
+  ) {
+    return Promise.reject(new Error(
+      "la fotocamera funziona solo da una pagina HTTPS (o da localhost)."
+    ));
+  }
+
+  return navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: {
+      facingMode: { ideal: facing },
+      width: { ideal: 640 },
+      height: { ideal: 480 }
+    }
+  });
+}
+
+function attachStream(stream) {
+  video.srcObject = stream;
+
+  const track = stream.getVideoTracks()[0];
+
+  // Specchio solo se la fotocamera guarda chi la usa.
+  // Le webcam dei computer spesso non lo dichiarano:
+  // in quel caso vale la scelta fatta con Gira.
+  const actual = track?.getSettings?.().facingMode;
+  setMirrored(actual ? actual === "user" : facing === "user");
+
+  // Fotocamera scollegata o permesso revocato.
+  track?.addEventListener("ended", () => {
+    if (video.srcObject !== stream) return;
+    stopAnalysis();
+    message.classList.add("error");
+    message.textContent = "La fotocamera si è disconnessa.";
+  });
+}
+
+// Il tasto Gira compare solo se ci sono almeno due fotocamere.
+async function updateFlipButton() {
+  try {
+    const devices =
+      await navigator.mediaDevices.enumerateDevices();
+
+    const cameras =
+      devices.filter(device => device.kind === "videoinput");
+
+    flipButton.hidden = !(mode === "live" && cameras.length > 1);
+  } catch {
+    flipButton.hidden = true;
+  }
+}
+
 async function startAnalysis() {
   const current = ++session;
 
+  leavePhoto();
   startButton.disabled = true;
+  pickPhotoButton.disabled = true;
   message.classList.remove("error");
   message.textContent = "Richiedo la fotocamera…";
 
   try {
-    if (
-      !window.isSecureContext ||
-      !navigator.mediaDevices?.getUserMedia
-    ) {
-      throw new Error(
-        "la fotocamera funziona solo da una pagina HTTPS (o da localhost)."
-      );
-    }
-
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        facingMode: "user",
-        width: { ideal: 640 },
-        height: { ideal: 480 }
-      }
-    });
+    const stream = await openCamera();
 
     if (current !== session) {
       stream.getTracks().forEach(track => track.stop());
       return;
     }
 
-    video.srcObject = stream;
-
-    // Fotocamera scollegata o permesso revocato.
-    stream.getVideoTracks()[0]?.addEventListener("ended", () => {
-      if (video.srcObject !== stream) return;
-      stopAnalysis();
-      message.classList.add("error");
-      message.textContent = "La fotocamera si è disconnessa.";
-    });
-
+    attachStream(stream);
     await video.play();
 
     startScreen.hidden = true;
+    stopButton.textContent = "Ferma";
     stopButton.hidden = false;
     faceState.textContent = "Carico il modello";
     message.textContent = "Carico il modello: serve la connessione.";
 
     landmarker = await loadLandmarker();
+    await setRunningMode("VIDEO");
 
     // Fermata durante il caricamento del modello.
     if (current !== session) return;
 
+    mode = "live";
     running = true;
     lastFrameTime = 0;
     lastVideoTime = -1;
@@ -800,6 +944,7 @@ async function startAnalysis() {
     faceState.textContent = "Cerco un volto";
     message.textContent = "Analisi in corso.";
 
+    updateFlipButton();
     animationId = requestAnimationFrame(analyze);
   } catch (error) {
     if (current !== session) return;
@@ -816,6 +961,142 @@ async function startAnalysis() {
   }
 }
 
+// Frontale ↔ posteriore. Molti telefoni non aprono due
+// fotocamere insieme: prima si spegne quella attiva.
+async function flipCamera() {
+  if (mode !== "live") return;
+
+  const current = session;
+  const previous = facing;
+
+  facing = facing === "user" ? "environment" : "user";
+  flipButton.disabled = true;
+  stopCamera();
+
+  try {
+    const stream = await openCamera();
+
+    if (current !== session) {
+      stream.getTracks().forEach(track => track.stop());
+      return;
+    }
+
+    attachStream(stream);
+    await video.play();
+
+    lastVideoTime = -1;
+    resetSlots();
+  } catch (error) {
+    facing = previous;
+    if (current !== session) return;
+
+    stopAnalysis();
+    message.classList.add("error");
+    message.textContent =
+      "Non riesco a cambiare fotocamera: " +
+      (error?.message || String(error));
+  } finally {
+    flipButton.disabled = false;
+  }
+}
+
+function pickPhoto() {
+  // Permette di ricaricare anche la stessa foto.
+  photoInput.value = "";
+  photoInput.click();
+}
+
+async function analyzePhoto(file) {
+  const current = ++session;
+
+  // Se la fotocamera era accesa, si spegne.
+  running = false;
+  if (animationId !== null) {
+    cancelAnimationFrame(animationId);
+    animationId = null;
+  }
+  stopCamera();
+  flipButton.hidden = true;
+
+  startButton.disabled = true;
+  pickPhotoButton.disabled = true;
+  anotherPhotoButton.disabled = true;
+  message.classList.remove("error");
+  message.textContent = "Carico la foto…";
+
+  try {
+    // Rispetta la rotazione salvata dal telefono.
+    const bitmap = await createImageBitmap(file, {
+      imageOrientation: "from-image"
+    });
+
+    const scale = Math.min(
+      1,
+      PHOTO_MAX / Math.max(bitmap.width, bitmap.height)
+    );
+
+    photoSource.width = Math.round(bitmap.width * scale);
+    photoSource.height = Math.round(bitmap.height * scale);
+
+    photoSource
+      .getContext("2d")
+      .drawImage(bitmap, 0, 0, photoSource.width, photoSource.height);
+
+    bitmap.close?.();
+
+    message.textContent = "Carico il modello: serve la connessione.";
+    landmarker = await loadLandmarker();
+    await setRunningMode("IMAGE");
+
+    if (current !== session) return;
+
+    mode = "photo";
+    setMirrored(false);
+    viewer.classList.add("photo-mode");
+    video.hidden = true;
+    photo.src = photoSource.toDataURL("image/jpeg", 0.92);
+    photo.hidden = false;
+
+    startScreen.hidden = true;
+    stopButton.textContent = "Chiudi";
+    stopButton.hidden = false;
+    anotherPhotoButton.hidden = false;
+
+    topStatus.textContent = "Foto";
+    topStatus.classList.add("live");
+    $("#fps").textContent = "Foto";
+
+    resetSlots();
+    photoResult = landmarker.detect(photoSource);
+    const count = renderResult(photoResult);
+
+    message.textContent = count
+      ? "Foto analizzata. Puoi caricarne un’altra."
+      : "Nessun volto trovato. Funziona meglio con volti grandi, frontali e ben illuminati.";
+  } catch (error) {
+    if (current !== session) return;
+
+    leavePhoto();
+    resetInterface();
+
+    message.classList.add("error");
+    message.textContent =
+      "Non riesco a leggere la foto: " +
+      (error?.message || String(error));
+  } finally {
+    anotherPhotoButton.disabled = false;
+  }
+}
+
+function leavePhoto() {
+  photoResult = null;
+  photo.hidden = true;
+  photo.removeAttribute("src");
+  video.hidden = false;
+  viewer.classList.remove("photo-mode");
+  anotherPhotoButton.hidden = true;
+}
+
 function stopCamera() {
   if (video.srcObject) {
     video.srcObject
@@ -827,6 +1108,8 @@ function stopCamera() {
 }
 
 function stopAnalysis() {
+  const wasPhoto = mode === "photo";
+
   session++;
   running = false;
 
@@ -836,11 +1119,13 @@ function stopAnalysis() {
   }
 
   stopCamera();
+  leavePhoto();
   resetInterface();
 
   message.classList.remove("error");
-  message.textContent =
-    "Analisi fermata. La fotocamera è spenta.";
+  message.textContent = wasPhoto
+    ? "Foto chiusa."
+    : "Analisi fermata. La fotocamera è spenta.";
 }
 
 function hideTags() {
@@ -849,9 +1134,13 @@ function hideTags() {
 
 function resetInterface() {
   running = false;
+  mode = "idle";
   startScreen.hidden = false;
   startButton.disabled = false;
+  pickPhotoButton.disabled = false;
   stopButton.hidden = true;
+  flipButton.hidden = true;
+  anotherPhotoButton.hidden = true;
   hideTags();
 
   topStatus.textContent = "In attesa";
@@ -867,7 +1156,7 @@ function resetInterface() {
 
   signalCount.textContent = "0/3";
   signals.innerHTML =
-    '<div class="empty">In attesa della fotocamera.</div>';
+    '<div class="empty">In attesa della fotocamera o di una foto.</div>';
 }
 
 function resetSlots() {
@@ -1169,24 +1458,29 @@ function drawFace(points, box) {
 }
 
 // Etichetta sopra il riquadro, allineata al suo bordo sinistro
-// sullo schermo (il video è specchiato).
+// sullo schermo. Tiene conto dello specchio (fotocamera frontale)
+// e di come l'immagine riempie il riquadro: tagliata (video)
+// o intera (foto).
 function positionTag(tag, box) {
   const vw = viewer.clientWidth;
   const vh = viewer.clientHeight;
-  const iw = video.videoWidth;
-  const ih = video.videoHeight;
+  const { width: iw, height: ih } = sourceSize();
 
   if (!iw || !ih) return;
 
-  const scale = Math.max(vw / iw, vh / ih);
+  const scale = mode === "photo"
+    ? Math.min(vw / iw, vh / ih)
+    : Math.max(vw / iw, vh / ih);
+
   const displayedWidth = iw * scale;
   const displayedHeight = ih * scale;
 
   const offsetX = (vw - displayedWidth) / 2;
   const offsetY = (vh - displayedHeight) / 2;
 
-  const screenLeft =
-    vw - (offsetX + box.right * displayedWidth);
+  const screenLeft = mirrored
+    ? vw - (offsetX + box.right * displayedWidth)
+    : offsetX + box.left * displayedWidth;
 
   const screenTop =
     offsetY + box.top * displayedHeight;
@@ -1209,6 +1503,98 @@ function positionTag(tag, box) {
     ) + "px";
 }
 
+// Disegna riquadri, etichette e pannello per un risultato
+// del modello (fotogramma video o foto). Restituisce i volti trovati.
+function renderResult(result) {
+  const { width: sw, height: sh } = sourceSize();
+
+  if (canvas.width !== sw || canvas.height !== sh) {
+    canvas.width = sw;
+    canvas.height = sh;
+  }
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const landmarks = result.faceLandmarks ?? [];
+  const blendshapes = result.faceBlendshapes ?? [];
+
+  // Volti ordinati da sinistra a destra sullo schermo.
+  // Con lo specchio, a sinistra c'è chi ha la x più alta nei dati.
+  const faces = landmarks
+    .map((points, index) => {
+      const categories = blendshapes[index]?.categories;
+      if (!categories) return null;
+
+      const box = faceBox(points);
+
+      return {
+        points,
+        box,
+        categories,
+        scores: new Map(
+          categories.map(item => [
+            item.categoryName,
+            item.score
+          ])
+        ),
+        centre: (box.left + box.right) / 2
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) =>
+      mirrored ? b.centre - a.centre : a.centre - b.centre
+    );
+
+  // Se cambia il numero di persone, la numerazione
+  // riparte: le etichette ricominciano da capo.
+  if (faces.length !== lastFaceCount) {
+    resetSlots();
+    lastFaceCount = faces.length;
+  }
+
+  hideTags();
+
+  if (!faces.length) {
+    faceState.textContent = "Nessun volto";
+    setInferred(null);
+    signalCount.textContent = "0/3";
+
+    signals.innerHTML =
+      '<div class="empty">Nessun volto nell’immagine.</div>';
+
+    return 0;
+  }
+
+  const multiple = faces.length > 1;
+
+  faceState.textContent = multiple
+    ? faces.length + " volti rilevati"
+    : "Volto rilevato";
+
+  updateSignals(faces);
+
+  const labels = faces.map((face, index) => {
+    drawFace(face.points, face.box);
+
+    const label = stableLabel(
+      slots[index],
+      emotionLabel(face.scores)
+    );
+
+    const tag = tags[index];
+    tag.textContent = multiple
+      ? faceNumber(index) + " · " + label
+      : "Volto_01 · " + label;
+    tag.hidden = false;
+    positionTag(tag, face.box);
+
+    return label;
+  });
+
+  setInferred(labels);
+  return faces.length;
+}
+
 function analyze(now) {
   if (!running) return;
 
@@ -1217,100 +1603,11 @@ function analyze(now) {
       video.readyState >= 2 &&
       video.currentTime !== lastVideoTime
     ) {
-      if (
-        canvas.width !== video.videoWidth ||
-        canvas.height !== video.videoHeight
-      ) {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-      }
-
       const result =
         landmarker.detectForVideo(video, now);
 
       lastVideoTime = video.currentTime;
-
-      ctx.clearRect(
-        0,
-        0,
-        canvas.width,
-        canvas.height
-      );
-
-      const landmarks = result.faceLandmarks ?? [];
-      const blendshapes = result.faceBlendshapes ?? [];
-
-      // Volti ordinati da sinistra a destra sullo schermo.
-      // Il video è specchiato: a sinistra sullo schermo
-      // c'è chi ha la x più alta nei dati.
-      const faces = landmarks
-        .map((points, index) => {
-          const categories = blendshapes[index]?.categories;
-          if (!categories) return null;
-
-          const box = faceBox(points);
-
-          return {
-            points,
-            box,
-            categories,
-            scores: new Map(
-              categories.map(item => [
-                item.categoryName,
-                item.score
-              ])
-            ),
-            centre: (box.left + box.right) / 2
-          };
-        })
-        .filter(Boolean)
-        .sort((a, b) => b.centre - a.centre);
-
-      // Se cambia il numero di persone, la numerazione
-      // riparte: le etichette ricominciano da capo.
-      if (faces.length !== lastFaceCount) {
-        resetSlots();
-        lastFaceCount = faces.length;
-      }
-
-      hideTags();
-
-      if (faces.length) {
-        const multiple = faces.length > 1;
-
-        faceState.textContent = multiple
-          ? faces.length + " volti rilevati"
-          : "Volto rilevato";
-
-        updateSignals(faces);
-
-        const labels = faces.map((face, index) => {
-          drawFace(face.points, face.box);
-
-          const label = stableLabel(
-            slots[index],
-            emotionLabel(face.scores)
-          );
-
-          const tag = tags[index];
-          tag.textContent = multiple
-            ? faceNumber(index) + " · " + label
-            : "Volto_01 · " + label;
-          tag.hidden = false;
-          positionTag(tag, face.box);
-
-          return label;
-        });
-
-        setInferred(labels);
-      } else {
-        faceState.textContent = "Nessun volto";
-        setInferred(null);
-        signalCount.textContent = "0/3";
-
-        signals.innerHTML =
-          '<div class="empty">Nessun volto nel riquadro.</div>';
-      }
+      renderResult(result);
 
       // FPS con media mobile, per un valore leggibile.
       if (lastFrameTime) {
