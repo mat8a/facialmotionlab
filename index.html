@@ -241,12 +241,10 @@ button:focus-visible {
   text-transform: uppercase;
 }
 
-/* Etichetta sul volto: Lettura/Etichetta piena */
-.face-labels {
+/* Etichetta sul volto: Lettura/Etichetta piena, una per volto */
+.face-tag {
   position: absolute;
   z-index: 4;
-  display: flex;
-  gap: 6px;
   pointer-events: none;
   white-space: nowrap;
 }
@@ -368,6 +366,19 @@ button:focus-visible {
   overflow-wrap: anywhere;
 }
 
+/* Più volti: una riga per persona, numero + emozione */
+.inferred.multi {
+  display: grid;
+  gap: 2px;
+  font-size: clamp(30px, 3vw, 38px);
+}
+
+.inferred-number {
+  display: inline-block;
+  min-width: 2.6ch;
+  font-weight: 400;
+}
+
 .inferred.off {
   color: var(--meta);
   font-weight: 400;
@@ -478,9 +489,7 @@ button:focus-visible {
         </p>
       </div>
 
-      <div id="faceLabels" class="face-labels machine" hidden>
-        <span id="tagFace" class="tag piena">Volto_01</span>
-      </div>
+      <div id="faceTags"></div>
 
       <button
         id="stop"
@@ -521,9 +530,9 @@ button:focus-visible {
           <span></span>
         </div>
         <p class="reader machine">Regole scritte a mano su MediaPipe</p>
-        <p id="inferred" class="inferred machine off" aria-live="polite">
+        <div id="inferred" class="inferred machine off" aria-live="polite">
           Nessuna lettura
-        </p>
+        </div>
         <div class="note" aria-hidden="true">
           <svg viewBox="0 0 46 40" fill="none" stroke="currentColor"
                stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -563,6 +572,9 @@ const WASM =
 
 const LIBRARY =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.15/vision_bundle.mjs";
+
+// Fino a tre persone nell'inquadratura.
+const MAX_FACES = 3;
 
 const ACTIVE_THRESHOLD = 0.30;
 
@@ -616,6 +628,9 @@ function italianName(name) {
   return (MOVEMENTS_IT[base] ?? name) + side;
 }
 
+const faceNumber = index =>
+  String(index + 1).padStart(2, "0");
+
 const $ = selector => document.querySelector(selector);
 
 const viewer = $("#viewer");
@@ -625,14 +640,22 @@ const ctx = canvas.getContext("2d");
 const startScreen = $("#startScreen");
 const startButton = $("#start");
 const stopButton = $("#stop");
-const faceLabels = $("#faceLabels");
-const tagFace = $("#tagFace");
+const faceTags = $("#faceTags");
 const faceState = $("#faceState");
 const topStatus = $("#topStatus");
 const message = $("#message");
 const signals = $("#signals");
 const signalCount = $("#signalCount");
 const inferred = $("#inferred");
+
+// Un'etichetta verde per ogni volto possibile.
+const tags = Array.from({ length: MAX_FACES }, () => {
+  const tag = document.createElement("span");
+  tag.className = "face-tag tag piena machine";
+  tag.hidden = true;
+  faceTags.append(tag);
+  return tag;
+});
 
 let landmarker = null;
 let landmarkerPromise = null;
@@ -642,11 +665,10 @@ let animationId = null;
 let lastVideoTime = -1;
 let lastFrameTime = 0;
 let fpsAverage = 0;
-let startedAt = 0;
+let lastFaceCount = 0;
 
-let candidateLabel = null;
-let candidateFrames = 0;
-let shownLabel = "indeterminata";
+// Stabilità dell'etichetta, separata per ogni posizione (01, 02, 03).
+let slots = [];
 
 startButton.addEventListener("click", startAnalysis);
 stopButton.addEventListener("click", stopAnalysis);
@@ -668,7 +690,7 @@ function loadLandmarker() {
           delegate: "CPU"
         },
         runningMode: "VIDEO",
-        numFaces: 1,
+        numFaces: MAX_FACES,
         outputFaceBlendshapes: true
       });
     })().catch(error => {
@@ -680,9 +702,38 @@ function loadLandmarker() {
   return landmarkerPromise;
 }
 
-function setInferred(text) {
-  inferred.textContent = text ?? "Nessuna lettura";
-  inferred.classList.toggle("off", !text);
+// Un volto: l'emozione grande, come prima.
+// Più volti: una riga per persona, numero + emozione.
+function setInferred(labels) {
+  inferred.classList.remove("off", "multi");
+
+  if (!labels?.length) {
+    inferred.textContent = "Nessuna lettura";
+    inferred.classList.add("off");
+    return;
+  }
+
+  if (labels.length === 1) {
+    inferred.textContent = labels[0];
+    return;
+  }
+
+  inferred.classList.add("multi");
+
+  const fragment = document.createDocumentFragment();
+
+  labels.forEach((label, index) => {
+    const row = document.createElement("span");
+
+    const number = document.createElement("span");
+    number.className = "inferred-number";
+    number.textContent = faceNumber(index);
+
+    row.append(number, label);
+    fragment.append(row);
+  });
+
+  inferred.replaceChildren(fragment);
 }
 
 async function startAnalysis() {
@@ -739,11 +790,10 @@ async function startAnalysis() {
     if (current !== session) return;
 
     running = true;
-    startedAt = performance.now();
     lastFrameTime = 0;
     lastVideoTime = -1;
     fpsAverage = 0;
-    resetLabel();
+    resetSlots();
 
     topStatus.textContent = "In diretta";
     topStatus.classList.add("live");
@@ -793,12 +843,16 @@ function stopAnalysis() {
     "Analisi fermata. La fotocamera è spenta.";
 }
 
+function hideTags() {
+  tags.forEach(tag => { tag.hidden = true; });
+}
+
 function resetInterface() {
   running = false;
   startScreen.hidden = false;
   startButton.disabled = false;
   stopButton.hidden = true;
-  faceLabels.hidden = true;
+  hideTags();
 
   topStatus.textContent = "In attesa";
   topStatus.classList.remove("live");
@@ -808,7 +862,7 @@ function resetInterface() {
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  resetLabel();
+  resetSlots();
   setInferred(null);
 
   signalCount.textContent = "0/3";
@@ -816,37 +870,41 @@ function resetInterface() {
     '<div class="empty">In attesa della fotocamera.</div>';
 }
 
-function resetLabel() {
-  candidateLabel = null;
-  candidateFrames = 0;
-  shownLabel = "indeterminata";
+function resetSlots() {
+  lastFaceCount = 0;
+  slots = Array.from({ length: MAX_FACES }, () => ({
+    candidate: null,
+    frames: 0,
+    shown: null
+  }));
 }
 
-function stableLabel(next) {
-  if (next === candidateLabel) {
-    candidateFrames++;
+function stableLabel(slot, next) {
+  // Volto appena comparso: mostra subito la prima lettura.
+  if (slot.shown === null) {
+    slot.candidate = next;
+    slot.frames = 1;
+    slot.shown = next;
+    return next;
+  }
+
+  if (next === slot.candidate) {
+    slot.frames++;
   } else {
-    candidateLabel = next;
-    candidateFrames = 1;
+    slot.candidate = next;
+    slot.frames = 1;
   }
 
-  if (candidateFrames >= HOLD_FRAMES) {
-    shownLabel = candidateLabel;
+  if (slot.frames >= HOLD_FRAMES) {
+    slot.shown = slot.candidate;
   }
 
-  return shownLabel;
+  return slot.shown;
 }
 
-function updateSignals(categories) {
-  const scores = new Map(
-    categories.map(item => [
-      item.categoryName,
-      item.score
-    ])
-  );
-
-  // Gli altri segnali degli occhi restano nell'analisi,
-  // ma non compaiono nel pannello.
+// Movimenti visibili di un volto: niente occhi,
+// tranne una riga unica per gli occhi socchiusi.
+function visibleMovements(categories, scores) {
   const visible = categories
     .filter(item =>
       item.categoryName !== "_neutral" &&
@@ -857,7 +915,6 @@ function updateSignals(categories) {
       score: item.score
     }));
 
-  // Una sola riga per gli occhi socchiusi.
   visible.push({
     categoryName: "eyeSquint",
     score:
@@ -867,10 +924,20 @@ function updateSignals(categories) {
       ) / 2
   });
 
-  const active = visible
-    .filter(item =>
-      item.score >= ACTIVE_THRESHOLD
+  return visible;
+}
+
+// I tre movimenti più marcati tra tutte le persone.
+// Con più volti, ogni riga dice a chi appartiene.
+function updateSignals(faces) {
+  const multiple = faces.length > 1;
+
+  const active = faces
+    .flatMap((face, index) =>
+      visibleMovements(face.categories, face.scores)
+        .map(item => ({ ...item, face: index }))
     )
+    .filter(item => item.score >= ACTIVE_THRESHOLD)
     .sort((a, b) => b.score - a.score)
     .slice(0, 3);
 
@@ -900,7 +967,9 @@ function updateSignals(categories) {
 
     const code = document.createElement("span");
     code.className = "reading-code";
-    code.textContent = item.categoryName;
+    code.textContent =
+      (multiple ? faceNumber(item.face) + " · " : "") +
+      item.categoryName;
 
     const track = document.createElement("span");
     track.className = "track";
@@ -1017,19 +1086,27 @@ function emotionLabel(scores) {
   return "indeterminata";
 }
 
+function faceBox(points) {
+  let left = Infinity;
+  let right = -Infinity;
+  let top = Infinity;
+  let bottom = -Infinity;
+
+  for (const point of points) {
+    if (point.x < left) left = point.x;
+    if (point.x > right) right = point.x;
+    if (point.y < top) top = point.y;
+    if (point.y > bottom) bottom = point.y;
+  }
+
+  return { left, right, top, bottom };
+}
+
 // Lettura/Riquadro volto: linea sottile rientrata
 // e angoli spessi, in verde macchina.
-function drawFace(points) {
+function drawFace(points, box) {
   const w = canvas.width;
   const h = canvas.height;
-
-  const xs = points.map(point => point.x);
-  const ys = points.map(point => point.y);
-
-  const left = Math.min(...xs);
-  const right = Math.max(...xs);
-  const top = Math.min(...ys);
-  const bottom = Math.max(...ys);
 
   // Landmark: punti piccoli, verde macchina.
   ctx.fillStyle = "rgba(36,167,64,.7)";
@@ -1047,10 +1124,10 @@ function drawFace(points) {
     ctx.fill();
   }
 
-  const x = left * w;
-  const y = top * h;
-  const bw = (right - left) * w;
-  const bh = (bottom - top) * h;
+  const x = box.left * w;
+  const y = box.top * h;
+  const bw = (box.right - box.left) * w;
+  const bh = (box.bottom - box.top) * h;
 
   const corner = Math.max(6, w / 210);
   const line = Math.max(2, w / 640);
@@ -1089,13 +1166,11 @@ function drawFace(points) {
   ctx.lineTo(x + c, y + bh - c);
   ctx.lineTo(x + c, y + bh - arm);
   ctx.stroke();
-
-  return { left, right, top };
 }
 
-// Etichette sopra il riquadro, allineate al suo bordo sinistro
+// Etichetta sopra il riquadro, allineata al suo bordo sinistro
 // sullo schermo (il video è specchiato).
-function positionFaceLabels(box) {
+function positionTag(tag, box) {
   const vw = viewer.clientWidth;
   const vh = viewer.clientHeight;
   const iw = video.videoWidth;
@@ -1118,18 +1193,18 @@ function positionFaceLabels(box) {
 
   const maxLeft = Math.max(
     8,
-    vw - faceLabels.offsetWidth - 8
+    vw - tag.offsetWidth - 8
   );
 
-  faceLabels.style.left =
+  tag.style.left =
     Math.max(8, Math.min(maxLeft, screenLeft)) + "px";
 
-  faceLabels.style.top =
+  tag.style.top =
     Math.max(
       56,
       Math.min(
         vh - 70,
-        screenTop - faceLabels.offsetHeight - 4
+        screenTop - tag.offsetHeight - 4
       )
     ) + "px";
 }
@@ -1162,40 +1237,74 @@ function analyze(now) {
         canvas.height
       );
 
-      const points =
-        result.faceLandmarks?.[0];
+      const landmarks = result.faceLandmarks ?? [];
+      const blendshapes = result.faceBlendshapes ?? [];
 
-      const blendshapes =
-        result.faceBlendshapes?.[0];
+      // Volti ordinati da sinistra a destra sullo schermo.
+      // Il video è specchiato: a sinistra sullo schermo
+      // c'è chi ha la x più alta nei dati.
+      const faces = landmarks
+        .map((points, index) => {
+          const categories = blendshapes[index]?.categories;
+          if (!categories) return null;
 
-      if (points && blendshapes) {
-        faceState.textContent = "Volto rilevato";
+          const box = faceBox(points);
 
-        updateSignals(
-          blendshapes.categories
-        );
+          return {
+            points,
+            box,
+            categories,
+            scores: new Map(
+              categories.map(item => [
+                item.categoryName,
+                item.score
+              ])
+            ),
+            centre: (box.left + box.right) / 2
+          };
+        })
+        .filter(Boolean)
+        .sort((a, b) => b.centre - a.centre);
 
-        const scores = new Map(
-          blendshapes.categories.map(
-            item => [
-              item.categoryName,
-              item.score
-            ]
-          )
-        );
+      // Se cambia il numero di persone, la numerazione
+      // riparte: le etichette ricominciano da capo.
+      if (faces.length !== lastFaceCount) {
+        resetSlots();
+        lastFaceCount = faces.length;
+      }
 
-        const box = drawFace(points);
-        const label = stableLabel(emotionLabel(scores));
+      hideTags();
 
-        tagFace.textContent = "Volto_01 · " + label;
+      if (faces.length) {
+        const multiple = faces.length > 1;
 
-        faceLabels.hidden = false;
-        positionFaceLabels(box);
-        setInferred(label);
+        faceState.textContent = multiple
+          ? faces.length + " volti rilevati"
+          : "Volto rilevato";
+
+        updateSignals(faces);
+
+        const labels = faces.map((face, index) => {
+          drawFace(face.points, face.box);
+
+          const label = stableLabel(
+            slots[index],
+            emotionLabel(face.scores)
+          );
+
+          const tag = tags[index];
+          tag.textContent = multiple
+            ? faceNumber(index) + " · " + label
+            : "Volto_01 · " + label;
+          tag.hidden = false;
+          positionTag(tag, face.box);
+
+          return label;
+        });
+
+        setInferred(labels);
       } else {
         faceState.textContent = "Nessun volto";
-        faceLabels.hidden = true;
-        resetLabel();
         setInferred(null);
         signalCount.textContent = "0/3";
 
