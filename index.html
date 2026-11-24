@@ -526,7 +526,7 @@ button:focus-visible {
           </button>
         </div>
         <p class="start-caption">
-          Foto e video restano su questo dispositivo: non vengono inviati a nessun server.
+          Le foto restano su questo dispositivo: non vengono inviate a nessun server.
         </p>
       </div>
 
@@ -744,8 +744,19 @@ let facing = "user";
 let mirrored = true;
 let photoResult = null;
 
-// Le foto grandi vengono ridotte: più veloci, stesso risultato.
-const PHOTO_MAX = 1280;
+// Le foto molto grandi vengono ridotte, ma non troppo:
+// i volti piccoli hanno bisogno di pixel.
+const PHOTO_MAX = 2048;
+
+// Ricerca a riquadri per le foto: l'immagine intera, poi una
+// griglia 2×2, una 3×3 e una 4×4 di riquadri sovrapposti. Dentro un
+// riquadro un volto piccolo diventa abbastanza grande da essere
+// trovato (il rilevatore riduce ogni immagine a 128 px).
+const PHOTO_GRIDS = [1, 2, 3, 4];
+// Sotto questa misura un riquadro non aggiunge dettaglio.
+const TILE_MIN = 192;
+const TILE_OVERLAP = 0.25;
+const tileCanvas = document.createElement("canvas");
 const photoSource = document.createElement("canvas");
 
 startButton.addEventListener("click", startAnalysis);
@@ -783,7 +794,12 @@ function loadLandmarker() {
         },
         runningMode: "VIDEO",
         numFaces: MAX_FACES,
-        outputFaceBlendshapes: true
+        outputFaceBlendshapes: true,
+        // Un po' più permissivo del valore predefinito (0,5):
+        // tiene i volti piccoli o in penombra.
+        minFaceDetectionConfidence: 0.35,
+        minFacePresenceConfidence: 0.35,
+        minTrackingConfidence: 0.35
       });
     })().catch(error => {
       landmarkerPromise = null;
@@ -1067,7 +1083,12 @@ async function analyzePhoto(file) {
     $("#fps").textContent = "Foto";
 
     resetSlots();
-    photoResult = landmarker.detect(photoSource);
+    message.textContent = "Cerco i volti nella foto…";
+    // Lascia al browser il tempo di mostrare il messaggio.
+    await new Promise(resolve => setTimeout(resolve, 30));
+    if (current !== session) return;
+
+    photoResult = detectInTiles(photoSource);
     const count = renderResult(photoResult);
 
     message.textContent = count
@@ -1086,6 +1107,110 @@ async function analyzePhoto(file) {
   } finally {
     anotherPhotoButton.disabled = false;
   }
+}
+
+// Cerca i volti nella foto intera e in griglie di riquadri,
+// riporta i punti nelle coordinate della foto e unisce i doppioni.
+// Restituisce lo stesso formato di landmarker.detect().
+function detectInTiles(source) {
+  const W = source.width;
+  const H = source.height;
+  const found = [];
+
+  for (const grid of PHOTO_GRIDS) {
+    // Lato del riquadro con sovrapposizione tra vicini.
+    const tw = grid === 1 ? W : Math.round(W / grid * (1 + TILE_OVERLAP));
+    const th = grid === 1 ? H : Math.round(H / grid * (1 + TILE_OVERLAP));
+    const stepX = grid === 1 ? 0 : (W - tw) / (grid - 1);
+    const stepY = grid === 1 ? 0 : (H - th) / (grid - 1);
+
+    if (grid > 1 && Math.min(tw, th) < TILE_MIN) continue;
+
+    for (let row = 0; row < grid; row++) {
+      for (let col = 0; col < grid; col++) {
+        const tx = Math.round(col * stepX);
+        const ty = Math.round(row * stepY);
+
+        tileCanvas.width = tw;
+        tileCanvas.height = th;
+        tileCanvas
+          .getContext("2d")
+          .drawImage(source, tx, ty, tw, th, 0, 0, tw, th);
+
+        const result = landmarker.detect(tileCanvas);
+
+        (result.faceLandmarks ?? []).forEach((points, index) => {
+          const categories =
+            result.faceBlendshapes?.[index]?.categories;
+          if (!categories) return;
+
+          const local = faceBox(points);
+
+          // Volto tagliato dal bordo del riquadro: lettura
+          // poco affidabile, vale solo se non c'è di meglio.
+          const margin = 0.01;
+          const cut = grid > 1 && (
+            (local.left < margin && tx > 0) ||
+            (local.top < margin && ty > 0) ||
+            (local.right > 1 - margin && tx + tw < W) ||
+            (local.bottom > 1 - margin && ty + th < H)
+          );
+
+          const mapped = points.map(point => ({
+            x: (tx + point.x * tw) / W,
+            y: (ty + point.y * th) / H,
+            z: point.z
+          }));
+
+          found.push({
+            points: mapped,
+            categories,
+            box: faceBox(mapped),
+            cut,
+            grid
+          });
+        });
+      }
+    }
+  }
+
+  // I migliori prima: interi prima dei tagliati, poi i riquadri
+  // più piccoli (più pixel per volto, punti più precisi).
+  found.sort((a, b) =>
+    (a.cut - b.cut) || (b.grid - a.grid)
+  );
+
+  const kept = [];
+
+  for (const face of found) {
+    const duplicate = kept.some(other =>
+      overlap(face.box, other.box) > 0.3
+    );
+    if (!duplicate) kept.push(face);
+  }
+
+  // Al massimo tre volti: i più grandi.
+  kept.sort((a, b) => area(b.box) - area(a.box));
+  const faces = kept.slice(0, MAX_FACES);
+
+  return {
+    faceLandmarks: faces.map(face => face.points),
+    faceBlendshapes: faces.map(face => ({ categories: face.categories }))
+  };
+}
+
+function area(box) {
+  return Math.max(0, box.right - box.left) *
+    Math.max(0, box.bottom - box.top);
+}
+
+// Sovrapposizione rispetto al riquadro più piccolo dei due:
+// un volto trovato due volte, anche a scale diverse, risulta ~1.
+function overlap(a, b) {
+  const w = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+  const h = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+  if (w <= 0 || h <= 0) return 0;
+  return (w * h) / Math.min(area(a), area(b));
 }
 
 function leavePhoto() {
