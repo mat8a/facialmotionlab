@@ -1830,7 +1830,8 @@ function emotionLabel(scores) {
 
   // Naso arricciato senza sorriso: nelle risate ampie
   // anche noseSneer sale, quindi il sorriso va escluso.
-  if (noseSneer > 0.38 && smile < 0.30) {
+  // Soglia abbassata da 0.38 a 0.30.
+  if (noseSneer > 0.30 && smile < 0.30) {
     return "disgusto";
   }
 
@@ -1874,9 +1875,10 @@ function emotionLabel(scores) {
   }
 
   // Angoli della bocca abbassati su entrambi i lati.
+  // Soglia abbassata da 0.25 a 0.18.
   if (
-    frownL > 0.25 &&
-    frownR > 0.25
+    frownL > 0.18 &&
+    frownR > 0.18
   ) {
     return "tristezza";
   }
